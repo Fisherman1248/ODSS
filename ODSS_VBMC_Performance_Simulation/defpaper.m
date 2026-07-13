@@ -1,0 +1,15 @@
+fs = 12;
+
+set(0,'DefaultLineLineWidth',2)
+set(0,'DefaultLineMarkerSize',10)
+%set(0,'DefaultLineMarkerSize','default')
+%set(0,'DefaultLineLineWidth','default')
+set(0,'DefaultAxesFontSize',fs)
+set(0,'DefaultAxesFontWeight','default')
+set(gca,'FontSize',fs)
+set(get(gca,'Xlabel'),'FontSize',fs)
+set(get(gca,'Ylabel'),'FontSize',fs)
+set(get(gca,'Title'),'FontSize',fs)
+set(get(gca,'Xlabel'),'FontWeight','default')
+set(get(gca,'Ylabel'),'FontWeight','default')
+set(get(gca,'Title'),'FontWeight','default')
