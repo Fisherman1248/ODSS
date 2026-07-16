@@ -10,9 +10,9 @@ T = 1.9;                % ODSS pulse/block duration in seconds
 TimeScaleN = 7;
 oversampling = 8; % fig. 9 illustrates
 pulseType = 'phydyas_2';
-QAM_order = 4;
+QAM_order = 2;
 
-SNRdB = 20;
+SNRdB = 200;
 
 % Waveform sampling rate
 Fs = oversampling * B;
@@ -251,6 +251,8 @@ ylabel('Magnitude');
 title('Transmitted and Received Signal Envelopes');
 legend('Location', 'best');
 
+
+
 %% ODSS receiver: extract Y[n,m] using Eq. (45)-(46)
 Y_grid = complex(zeros(Nscale, M_scale(end)));
 Ys_grid = complex(zeros(Nscale, M_scale(end))); % represent the H[n,m] X[n,m] in eq. (51)
@@ -313,8 +315,7 @@ for n = 0:Nscale-1
 
     Mn = M_scale(n+1);
 
-    X_vector(symbolPointer:symbolPointer+Mn-1) = ...
-        X_grid(n+1,1:Mn).';
+    X_vector(symbolPointer:symbolPointer+Mn-1) = X_grid(n+1,1:Mn).';
 
     symbolPointer = symbolPointer + Mn;
 end
@@ -330,20 +331,14 @@ end
 % Eq. (65):
 %
 % H_{n,m}[n,m]
-%   = sum_p h_p A_{g_rx,g_tx}(
-%         q^n * [
-%             m/(q^n W)*(alpha_p-1)
-%             - alpha_p*tau_p
-%         ],
-%         1/alpha_p
-%     )
+%   = sum_p h_p A_{g_rx,g_tx}(q^n * [m/(q^n W)*(alpha_p-1)- alpha_p*tau_p],
+%         1/alpha_p)
 
 Hdiag_grid = complex(zeros(Nscale, M_scale(end)));
 Hdiag_vector = complex(zeros(M_tot,1));
 
 % Samples of the basic transmit pulse g_tx(t)
-gTxBasic = odssTransmitPulse( ...
-    t, q, W, T, pulseType);
+gTxBasic = odssTransmitPulse(t, q, W, T, pulseType);
 
 symbolPointer = 1;
 
@@ -359,16 +354,14 @@ for n = 0:Nscale-1
         for p = 1:Path_num
 
             % First ambiguity argument in Eq. (65)
-            tauAmb = alphaGrid * ( ...
-                m/(alphaGrid*W) * (alpha_p(p)-1) ...
+            tauAmb = alphaGrid * ( m/(alphaGrid*W) * (alpha_p(p)-1) ...
                 - alpha_p(p)*tau_p(p));
 
             % Second ambiguity argument in Eq. (65)
             alphaAmb = 1 / alpha_p(p);
 
             % A_{g_rx,g_tx}(tauAmb, alphaAmb)
-            ambiguityPath = odssAmbiguitySample( ...
-                gTxBasic, t, tauAmb, alphaAmb, ...
+            ambiguityPath = odssAmbiguitySample(gTxBasic, t, tauAmb, alphaAmb, ...
                 q, W, T, pulseType);
 
             Hnm = Hnm + h_p(p)*ambiguityPath;
@@ -392,12 +385,9 @@ fprintf('Diagonal channel coefficients computed.\n');
 
 Ys_diagonal_model = Hdiag_vector .* X_vector;
 
-diagonalModelError = ...
-    norm(Ys_vector - Ys_diagonal_model) / ...
-    max(norm(Ys_vector), eps);
+diagonalModelError = norm(Ys_vector - Ys_diagonal_model) / max(norm(Ys_vector), eps);
 
-fprintf('Eq. (51) diagonal-model error: %.3e\n', ...
-    diagonalModelError);
+fprintf('Eq. (51) diagonal-model error: %.3e\n', diagonalModelError);
 
 % Interpretation:
 % small error  -> one-tap receiver assumption is reasonable
@@ -428,9 +418,7 @@ fprintf('Delay-scale noise variance: %.6e\n', sigmaW2);
 % Z_hat_i =
 %   conj(H_i) Y_i / (|H_i|^2 + sigmaW2)
 
-Zhat_vector = ...
-    conj(Hdiag_vector) .* Y_vector ./ ...
-    (abs(Hdiag_vector).^2 + sigmaW2 + eps);
+Zhat_vector = conj(Hdiag_vector) .* Y_vector ./ (abs(Hdiag_vector).^2 + sigmaW2 + eps);
 
 % Put Z_hat back into the scale-delay grid
 Zhat_grid = complex(zeros(Nscale, M_scale(end)));
@@ -447,12 +435,9 @@ for n = 0:Nscale-1
     symbolPointer = symbolPointer + Mn;
 end
 
-equalizedXError = ...
-    norm(Zhat_vector-X_vector) / ...
-    max(norm(X_vector),eps);
+equalizedXError = norm(Zhat_vector-X_vector) / max(norm(X_vector),eps);
 
-fprintf('Equalized X-domain relative error: %.3e\n', ...
-    equalizedXError);
+fprintf('Equalized X-domain relative error: %.3e\n', equalizedXError);
 
 
 %% 7. Inverse discrete Mellin-Fourier transform
@@ -468,79 +453,48 @@ fprintf('Equalized X-domain relative error: %.3e\n', ...
 x_hat_grid = complex(zeros(Nscale, M_scale(end)));
 
 for k = 0:Nscale-1
-
     Mk = M_scale(k+1);
-
     for l = 0:Mk-1
-
         temp = 0;
-
         for n = 0:Nscale-1
-
             Mn = M_scale(n+1);
             mVector = 0:Mn-1;
-
-            phase = exp( ...
-                1j*2*pi * ...
-                (n*k/Nscale - mVector*l/Mn));
-
-            temp = temp + ...
-                q^(n/2) * ...
-                sum(Zhat_grid(n+1,1:Mn) .* phase);
+            phase = exp(1j*2*pi * (n*k/Nscale - mVector*l/Mn));
+            temp = temp + q^(n/2) * sum(Zhat_grid(n+1,1:Mn) .* phase);
         end
-
         x_hat_grid(k+1,l+1) = temp;
     end
 end
 
 
 %% 8. Convert recovered x_hat[k,l] to vector form
-
 x_hat_vector = complex(zeros(M_tot,1));
-
 symbolPointer = 1;
-
 for k = 0:Nscale-1
-
     Mk = M_scale(k+1);
-
-    x_hat_vector(symbolPointer:symbolPointer+Mk-1) = ...
-        x_hat_grid(k+1,1:Mk).';
-
+    x_hat_vector(symbolPointer:symbolPointer+Mk-1) = x_hat_grid(k+1,1:Mk).';
     symbolPointer = symbolPointer + Mk;
 end
 
-dataSymbolError = ...
-    norm(x_hat_vector-x_vector) / ...
-    max(norm(x_vector),eps);
+dataSymbolError = norm(x_hat_vector-x_vector) / max(norm(x_vector),eps);
 
-fprintf('Recovered data-symbol relative error: %.3e\n', ...
-    dataSymbolError);
+fprintf('Recovered data-symbol relative error: %.3e\n', dataSymbolError);
 
 
 %% 9. QAM constellation slicing, Eq. (70)
-
-rx_bits = qamdemod( ...
-    x_hat_vector, ...
-    QAM_order, ...
-    'OutputType', 'bit', ...
-    'UnitAveragePower', true);
-
+rx_bits = qamdemod(x_hat_vector, QAM_order, 'OutputType', 'bit', 'UnitAveragePower', true);
 rx_bits = rx_bits(:);
 
 numBitErrors = sum(rx_bits ~= tx_bits);
 BER = numBitErrors / numel(tx_bits);
 
 fprintf('\nReceiver results:\n');
-fprintf('Bit errors: %d / %d\n', ...
-    numBitErrors, numel(tx_bits));
+fprintf('Bit errors: %d / %d\n', numBitErrors, numel(tx_bits));
 fprintf('BER: %.6e\n', BER);
 
 
 %% 10. Plot transmitted and recovered QAM symbols
-
 figure;
-
 subplot(1,2,1);
 scatter(real(x_vector), imag(x_vector), 25, 'filled');
 grid on;
