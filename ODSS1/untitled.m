@@ -9,8 +9,10 @@ W = B*(q-1)/(q^Nscale-1); % Transmit filter bandwidth, Eq. (77)
 T = 1.9;                % ODSS pulse/block duration in seconds
 TimeScaleN = 7;
 oversampling = 8; % fig. 9 illustrates
-pulseType = 'phydyas';
+pulseType = 'phydyas_2';
 QAM_order = 4;
+
+SNRdB = 20;
 
 % Waveform sampling rate
 Fs = oversampling * B;
@@ -80,7 +82,7 @@ for n = 0:Nscale-1
 end
 
 
-%% Generate ODSS transmitted waveform, Eq. (73)
+%% Generate ODSS transmitted waveform s(t), Eq. (73)
 
 % Time axis for one ODSS block
 t = 0:Ts:(T-Ts);
@@ -112,7 +114,6 @@ fprintf('ODSS block duration: %.6f s\n', T);
 fprintf('Number of samples: %d\n', length(s_tx));
 
 %% Check individual ODSS scale spectra, similar to Fig. 8
-
 Nfft = 2^nextpow2(length(t)) * 4;
 f = (0:Nfft/2-1) * Fs/Nfft;
 
@@ -125,25 +126,173 @@ for n = 0:Nscale-1
     % not the magnitude spectrum
     tLocal = q^n * t;
 
-    g_tx_n = odssTransmitPulse( ...
-        tLocal, q, W, T, pulseType);
+    g_tx_n = odssTransmitPulse(tLocal, q, W, T, pulseType);
 
     s_n = q^(n/2) * g_tx_n;
 
     S_n = fft(s_n, Nfft);
     S_n = S_n(1:Nfft/2);
 
-    S_n_dB = 20*log10( ...
-        abs(S_n)/max(abs(S_n)) + eps);
+    S_n_dB = 20*log10(abs(S_n)/max(abs(S_n)) + eps);
 
-    plot(f, S_n_dB, ...
-        'DisplayName', sprintf('n = %d', n));
+    plot(f, S_n_dB, 'DisplayName', sprintf('n = %d', n));
 end
 
 xlabel('Frequency (Hz)');
 ylabel('Normalized magnitude (dB)');
 title('Individual ODSS Scale Spectra');
 xlim([0 B]);
-ylim([-60 5]);
+ylim([-50 0]);
 grid on;
 legend('Location', 'best');
+
+
+%% Wideband delay-scale channel
+% Implements:
+%
+% rs(t) = sum_p h_p * sqrt(alpha_p) * s_tx(alpha_p * (t - tau_p))
+%
+% r(t) = rs(t) + w(t)
+
+
+%% Generate complex channel coefficients h_p
+h_p = (randn(Path_num,1) + 1j*randn(Path_num,1)) / sqrt(2);
+h_p = h_p / norm(h_p); % Normalize the total path energy to one
+
+%% Construct receiver time axis
+Ntx = length(s_tx); % length of the transmitted signal
+Ttx = Ntx / Fs; % duration of the transmitted signal
+
+% The p-th path exists approximately over:
+% tau_p <= t < tau_p + Ttx/alpha_p, t: the p-th path signal non-zero time
+% Therefore, observe until the last path ends.
+tEnd = max(tau_p + Ttx ./ alpha_p); % latest path ending time
+Nrx = max(1, ceil(tEnd * Fs)); % the number of the reciever sampling points
+tRx = (0:Nrx-1) * Ts; % receiver side sampling axis
+
+%% Pass s_tx through every delay-scale path
+rs = complex(zeros(1, Nrx));
+pathSignals = complex(zeros(Path_num, Nrx)); % Store every individual path for inspection
+
+for p = 1:Path_num
+    % Continuous-time argument required by the paper -- eq. (1)
+    % u_p(t) = alpha_p * (t - tau_p) 
+    u = alpha_p(p) * (tRx - tau_p(p));
+    % Since u usually does not lie exactly on the transmitted sampling grid, estimate s_tx(u) by interpolation.
+    sScaledDelayed = interp1(t, s_tx, u, 'linear', 0);
+
+    % Contribution from the p-th path
+    pathSignals(p,:) = h_p(p) * sqrt(alpha_p(p)) .* sScaledDelayed;
+
+    % Add this path to the received waveform
+    rs = rs + pathSignals(p,:);
+end
+
+%% Add complex AWGN
+Ps = mean(abs(rs).^2);
+if isinf(SNRdB)
+    Pn = 0;
+    w = complex(zeros(size(rs)));
+else
+    Pn = Ps * 10^(-SNRdB/10);
+    w = sqrt(Pn/2) .* (randn(size(rs)) + 1j*randn(size(rs)));
+end
+% Final received waveform
+r = rs + w;
+
+%% Display channel information
+fprintf('\nDelay-scale channel:\n');
+fprintf('Number of paths: %d\n', Path_num);
+fprintf('Receiver duration: %.6f s\n', tRx(end));
+fprintf('Number of received samples: %d\n', length(r));
+fprintf('Signal power: %.6e\n', Ps);
+fprintf('Noise power: %.6e\n', Pn);
+
+if ~isinf(SNRdB)
+    measuredSNR = 10*log10( ...
+        mean(abs(rs).^2) / mean(abs(w).^2));
+
+    fprintf('Target SNR: %.2f dB\n', SNRdB);
+    fprintf('Measured SNR: %.2f dB\n', measuredSNR);
+end
+
+%% Plot transmitted and received waveforms
+figure;
+subplot(3,1,1);
+plot(t, real(s_tx));
+grid on;
+xlabel('Time (s)');
+ylabel('Real\{s_{tx}(t)\}');
+title('Transmitted ODSS Waveform');
+
+subplot(3,1,2);
+plot(tRx, real(rs));
+grid on;
+xlabel('Time (s)');
+ylabel('Real\{r_s(t)\}');
+title('Noise-Free Received Waveform');
+
+subplot(3,1,3);
+plot(tRx, real(r));
+grid on;
+xlabel('Time (s)');
+ylabel('Real\{r(t)\}');
+title(sprintf('Received Waveform, SNR = %.1f dB', SNRdB));
+
+%% Plot magnitude envelopes
+figure;
+plot(t, abs(s_tx), 'DisplayName', '|s_{tx}(t)|');
+hold on;
+plot(tRx, abs(rs), 'DisplayName', '|r_s(t)|');
+
+grid on;
+xlabel('Time (s)');
+ylabel('Magnitude');
+title('Transmitted and Received Signal Envelopes');
+legend('Location', 'best');
+
+%% ODSS receiver: scale-delay signal extraction
+% Y_hat[n,m] = A_{g_rx,r}(tau,alpha)
+% evaluated at: tau = m/(q^n W), alpha = q^n
+Y_rx_grid = complex(zeros(Nscale, M_scale(end)));
+W_rx_grid = complex(zeros(Nscale, M_scale(end))); % noise
+
+% Basic pulse energy
+g_tx_basic = odssTransmitPulse(t, q, W, T, pulseType);
+
+A00 = Ts * sum(abs(g_tx_basic).^2);
+
+fprintf('\nBasic pulse energy A(0,1): %.6e\n', A00);
+
+for n = 0:Nscale-1
+
+    alphaGrid = q^n;
+    Mn = M_scale(n+1);
+
+    for m = 0:Mn-1
+
+        % Delay-scale sampling location
+        tauGrid = m / (alphaGrid * W);
+
+        % g_rx(alpha(t-tau))
+        tLocalRx = alphaGrid * (tRx - tauGrid);
+
+        % First implementation: use the same pulse at Tx and Rx.
+        %
+        % Divide by A00 so that, approximately,
+        % A_{g_rx,g_tx}(0,1) = 1.
+        g_rx_nm = ...
+            sqrt(alphaGrid) .* ...
+            odssTransmitPulse( ...
+                tLocalRx, q, W, T, pulseType) ...
+            / A00;
+
+        % Continuous integral approximated by Ts * sum(...)
+        Y_rx_grid(n+1,m+1) = ...
+            Ts * sum(conj(g_rx_nm) .* r);
+
+        % Only available in simulation, used to estimate output noise
+        W_rx_grid(n+1,m+1) = ...
+            Ts * sum(conj(g_rx_nm) .* w);
+    end
+end

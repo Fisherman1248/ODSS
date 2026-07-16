@@ -45,28 +45,60 @@ g0 = exp(1j*2*pi .* ...
 
     %% Pulse-shaping window g_w(t), Eq. (72)
 
+    % switch lower(pulseType)
+    % 
+    %     case 'rect'
+    % 
+    %         gw = ones(size(tValid));
+    % 
+    %     case 'phydyas'
+    % 
+    %         K = 3;
+    %         A = [0.91143783, 0.41143783];
+    % 
+    %         gw = ones(size(tValid));
+    % 
+    %         for r = 1:K-1
+    %             gw = gw + 2*(-1)^r*A(r) .* cos(2*pi*r*tValid/(K*T));
+    %         end
+    % 
+    %     otherwise
+    % 
+    %         error('Unknown pulse type: %s', pulseType);
+    % end
+    
+
     switch lower(pulseType)
 
-        case 'rect'
+    case 'rect'
+        gw = ones(size(tValid));
 
-            gw = ones(size(tValid));
+    case 'phydyas_1'
+        % 逐字实现论文式 (72)
+        K = 3;
+        A = [0.91143783, 0.41143783];
 
-        case 'phydyas'
+        gw = ones(size(tValid));
 
-            K = 3;
-            A = [0.91143783, 0.41143783];
+        for r = 1:K-1
+            gw = gw + 2*(-1)^r*A(r) .* cos(2*pi*r*tValid/(K*T));
+        end
 
-            gw = ones(size(tValid));
+    case 'phydyas_2'
+        % 仅用于诊断：把完整窗映射到 [0,T]
+        K = 3;
+        A = [0.91143783, 0.41143783];
 
-            for r = 1:K-1
-                gw = gw + 2*(-1)^r*A(r) .* cos(2*pi*r*tValid/(K*T));
-            end
+        gw = ones(size(tValid));
 
-        otherwise
+        for r = 1:K-1
+            gw = gw + 2*(-1)^r*A(r) .* cos(2*pi*r*tValid/T);
+        end
 
-            error('Unknown pulse type: %s', pulseType);
+    otherwise
+        error('Unknown pulse type: %s', pulseType);
     end
-
+    
     %% g_tx(t) = g_w(t)g_0(t)
 
     g_tx(valid) = gw .* g0;
