@@ -1,0 +1,42 @@
+function Avalue = odssAmbiguitySample(z, tAxis, tau, alpha, q, W, T, pulseType)
+% odssAmbiguitySample
+%
+% Discrete implementation of Eq. (46):
+%
+% A_{g_rx,z}(tau,alpha)
+%   = integral sqrt(alpha) ...
+%     * conj(g_rx(alpha*(t-tau))) * z(t) dt
+%
+% The integral is approximated by:
+%
+% integral f(t)dt ~= Ts * sum_k f(t_k)
+    z = z(:).';
+    tAxis = tAxis(:).';
+
+    if length(z) ~= length(tAxis)
+        error('z and tAxis must have the same number of samples.');
+    end
+
+    if length(tAxis) < 2
+        error('At least two time samples are required.');
+    end
+
+    TsLocal = tAxis(2) - tAxis(1);
+
+    % Argument alpha(t-tau) in Eq. (46)
+    tLocal = alpha * (tAxis - tau);
+
+    % First implementation assumes:
+    %
+    % g_rx(t) = g_tx(t)
+    %
+    % Later this can be replaced by a separate receive-pulse function.
+    gRxBase = odssTransmitPulse(tLocal, q, W, T, pulseType);
+
+    % Full receive atom:
+    % sqrt(alpha) * g_rx(alpha(t-tau))
+    gRxAtom = sqrt(alpha) .* gRxBase;
+
+    % Discrete approximation of the continuous integral
+    Avalue = TsLocal * sum(conj(gRxAtom) .* z);
+end
