@@ -10,18 +10,18 @@ T = 1.9;                % ODSS pulse/block duration in seconds
 TimeScaleN = 7;
 oversampling = 8; % fig. 9 illustrates
 pulseType = 'phydyas_2';
-QAM_order = 2;
+QAM_order = 4;
 
-SNRdB = 200;
+SNRdB = 100;
 
 % Waveform sampling rate
 Fs = oversampling * B;
 Ts = 1/Fs;
 
 % Channel Simulation set up, follow fig. 9
-Path_num = 20;
-tau_max = 0.01;
-alpha_max = 1.001;
+Path_num = 1;
+tau_max = 0;
+alpha_max = 1.00;
 
 tau_p = tau_max * rand(Path_num, 1); % Uniform delay: U(0, tau_max)
 
@@ -62,52 +62,59 @@ X_grid = complex(zeros(Nscale, M_scale(end)));
 % traverse for n in X[n,m]
 for n = 0:Nscale-1
     Mn = M_scale(n+1);
-    
     % traverse for m in X[n,m]
     for m = 0:Mn-1
-        temp = 0;
-        
+        temp = 0;   
         % eq. 38 outer summation
         for k = 0:Nscale-1
             Mk = M_scale(k+1);
             l = 0:Mk-1;
-
             phase = exp(1j*2*pi * (m*l/Mk - n*k/Nscale));
-
             temp = temp + sum(x_grid(k+1, 1:Mk) .* phase) / Mk; % inner summation
         end
-
         X_grid(n+1, m+1) = q^(-n/2) * temp / Nscale; % scaling
     end
 end
 
+%% Convert X[n,m] to vector before waveform generation
+X_vector = complex(zeros(M_tot,1));
 
-%% Generate ODSS transmitted waveform s(t), Eq. (73)
-
-% Time axis for one ODSS block
-t = 0:Ts:(T-Ts);
-
-% Initialize transmitted waveform
-s_tx = complex(zeros(size(t)));
+symbolPointer = 1;
 
 for n = 0:Nscale-1
+    Mn = M_scale(n+1);
 
+    X_vector(symbolPointer:symbolPointer+Mn-1) = ...
+        X_grid(n+1,1:Mn).';
+
+    symbolPointer = symbolPointer + Mn;
+end
+
+%% Generate sampled ODSS transmit basis and waveform
+t = (0:Ts:T-Ts).';       % column vector
+
+G_tx = complex(zeros(length(t), M_tot));
+
+symbolPointer = 1;
+
+for n = 0:Nscale-1
     Mn = M_scale(n+1);
 
     for m = 0:Mn-1
-        % Local time argument in Eq. (73)
-        tLocal = q^n * (t - m/(q^n * W));
+        tLocal = q^n * (t - m/(q^n*W));
 
-        % Evaluate g_tx at the scaled and shifted time points
-        g_tx_nm = odssTransmitPulse(tLocal, q, W, T, pulseType);
+        g_tx_nm = odssTransmitPulse( ...
+            tLocal, q, W, T, pulseType);
 
-        % ODSS subcarrier s_{m,n}(t), Eq. (73)
         s_mn = q^(n/2) * g_tx_nm;
 
-        % Weighted superposition, Eq. (40)
-        s_tx = s_tx + X_grid(n+1,m+1) * s_mn;
+        G_tx(:,symbolPointer) = s_mn(:);
+
+        symbolPointer = symbolPointer + 1;
     end
 end
+
+s_tx = G_tx * X_vector;
 
 fprintf('Waveform sample rate: %.1f Hz\n', Fs);
 fprintf('ODSS block duration: %.6f s\n', T);
@@ -116,28 +123,19 @@ fprintf('Number of samples: %d\n', length(s_tx));
 %% Check individual ODSS scale spectra, similar to Fig. 8
 Nfft = 2^nextpow2(length(t)) * 4;
 f = (0:Nfft/2-1) * Fs/Nfft;
-
 figure;
 hold on;
-
 for n = 0:Nscale-1
-
     % Use m = 0; time shifts only change spectral phase,
     % not the magnitude spectrum
     tLocal = q^n * t;
-
     g_tx_n = odssTransmitPulse(tLocal, q, W, T, pulseType);
-
     s_n = q^(n/2) * g_tx_n;
-
     S_n = fft(s_n, Nfft);
     S_n = S_n(1:Nfft/2);
-
     S_n_dB = 20*log10(abs(S_n)/max(abs(S_n)) + eps);
-
     plot(f, S_n_dB, 'DisplayName', sprintf('n = %d', n));
 end
-
 xlabel('Frequency (Hz)');
 ylabel('Normalized magnitude (dB)');
 title('Individual ODSS Scale Spectra');
@@ -147,58 +145,25 @@ grid on;
 legend('Location', 'best');
 
 
-%% Wideband delay-scale channel
-% Implements:
-%
-% rs(t) = sum_p h_p * sqrt(alpha_p) * s_tx(alpha_p * (t - tau_p))
-%
-% r(t) = rs(t) + w(t)
+%% Pure AWGN channel
+rs = s_tx;
 
-
-%% Generate complex channel coefficients h_p
-h_p = (randn(Path_num,1) + 1j*randn(Path_num,1)) / sqrt(2);
-h_p = h_p / norm(h_p); % Normalize the total path energy to one
-
-%% Construct receiver time axis
-Ntx = length(s_tx); % length of the transmitted signal
-Ttx = Ntx / Fs; % duration of the transmitted signal
-
-% The p-th path exists approximately over:
-% tau_p <= t < tau_p + Ttx/alpha_p, t: the p-th path signal non-zero time
-% Therefore, observe until the last path ends.
-tEnd = max(tau_p + Ttx ./ alpha_p); % latest path ending time
-Nrx = max(1, ceil(tEnd * Fs)); % the number of the reciever sampling points
-tRx = (0:Nrx-1) * Ts; % receiver side sampling axis
-
-%% Pass s_tx through every delay-scale path
-rs = complex(zeros(1, Nrx));
-pathSignals = complex(zeros(Path_num, Nrx)); % Store every individual path for inspection
-
-for p = 1:Path_num
-    % Continuous-time argument required by the paper -- eq. (1)
-    % u_p(t) = alpha_p * (t - tau_p) 
-    u = alpha_p(p) * (tRx - tau_p(p));
-    % Since u usually does not lie exactly on the transmitted sampling grid, estimate s_tx(u) by interpolation.
-    sScaledDelayed = interp1(t, s_tx, u, 'linear', 0);
-
-    % Contribution from the p-th path
-    pathSignals(p,:) = h_p(p) * sqrt(alpha_p(p)) .* sScaledDelayed;
-
-    % Add this path to the received waveform
-    rs = rs + pathSignals(p,:);
-end
-
-%% Add complex AWGN
 Ps = mean(abs(rs).^2);
-if isinf(SNRdB)
-    Pn = 0;
-    w = complex(zeros(size(rs)));
-else
-    Pn = Ps * 10^(-SNRdB/10);
-    w = sqrt(Pn/2) .* (randn(size(rs)) + 1j*randn(size(rs)));
-end
-% Final received waveform
+Pn = Ps * 10^(-SNRdB/10);
+
+w = sqrt(Pn/2) * ...
+    (randn(size(rs)) + 1j*randn(size(rs)));
+
 r = rs + w;
+
+measuredSNR = 10*log10( ...
+    mean(abs(rs).^2) / mean(abs(w).^2));
+
+fprintf('\nPure AWGN channel:\n');
+fprintf('Signal power: %.6e\n', Ps);
+fprintf('Noise power: %.6e\n', Pn);
+fprintf('Target SNR: %.2f dB\n', SNRdB);
+fprintf('Measured SNR: %.2f dB\n', measuredSNR);
 
 %% Display channel information
 fprintf('\nDelay-scale channel:\n');
@@ -216,269 +181,42 @@ if ~isinf(SNRdB)
     fprintf('Measured SNR: %.2f dB\n', measuredSNR);
 end
 
-%% Plot transmitted and received waveforms
-figure;
-subplot(3,1,1);
-plot(t, real(s_tx));
-grid on;
-xlabel('Time (s)');
-ylabel('Real\{s_{tx}(t)\}');
-title('Transmitted ODSS Waveform');
 
-subplot(3,1,2);
-plot(tRx, real(rs));
-grid on;
-xlabel('Time (s)');
-ylabel('Real\{r_s(t)\}');
-title('Noise-Free Received Waveform');
+%% Construct sampled biorthogonal receive basis
+Gram = Ts * (G_tx' * G_tx);
 
-subplot(3,1,3);
-plot(tRx, real(r));
-grid on;
-xlabel('Time (s)');
-ylabel('Real\{r(t)\}');
-title(sprintf('Received Waveform, SNR = %.1f dB', SNRdB));
+fprintf('\nWaveform diagnostics:\n');
+fprintf('rank(G_tx) = %d / %d\n', rank(G_tx), M_tot);
+fprintf('cond(Gram) = %.3e\n', cond(Gram));
 
-%% Plot magnitude envelopes
-figure;
-plot(t, abs(s_tx), 'DisplayName', '|s_{tx}(t)|');
-hold on;
-plot(tRx, abs(rs), 'DisplayName', '|r_s(t)|');
-
-grid on;
-xlabel('Time (s)');
-ylabel('Magnitude');
-title('Transmitted and Received Signal Envelopes');
-legend('Location', 'best');
-
-
-
-%% ODSS receiver: extract Y[n,m] using Eq. (45)-(46)
-Y_grid = complex(zeros(Nscale, M_scale(end)));
-Ys_grid = complex(zeros(Nscale, M_scale(end))); % represent the H[n,m] X[n,m] in eq. (51)
-Wnoise_grid = complex(zeros(Nscale, M_scale(end)));
-
-Y_vector = complex(zeros(M_tot,1));
-Ys_vector = complex(zeros(M_tot,1));
-Wnoise_vector = complex(zeros(M_tot,1));
-
-symbolPointer = 1;
-
-for n = 0:Nscale-1
-
-    alphaGrid = q^n;
-    Mn = M_scale(n+1);
-
-    for m = 0:Mn-1
-
-        % Scale-delay sampling point in Eq. (45)
-        tauGrid = m / (alphaGrid * W);
-
-        % Received signal including noise
-        Ynm = odssAmbiguitySample(r, tRx, tauGrid, alphaGrid, q, W, T, pulseType);
-
-        % Noise-free received signal
-        Ysnm = odssAmbiguitySample(rs, tRx, tauGrid, alphaGrid, q, W, T, pulseType);
-
-        % Receiver-domain noise
-        Wnm = odssAmbiguitySample(w, tRx, tauGrid, alphaGrid, q, W, T, pulseType);
-
-        % Store as grids
-        Y_grid(n+1,m+1) = Ynm;
-        Ys_grid(n+1,m+1) = Ysnm;
-        Wnoise_grid(n+1,m+1) = Wnm;
-
-        % Store using the same valid-symbol ordering
-        Y_vector(symbolPointer) = Ynm;
-        Ys_vector(symbolPointer) = Ysnm;
-        Wnoise_vector(symbolPointer) = Wnm;
-
-        symbolPointer = symbolPointer + 1;
-    end
+if rcond(Gram) < 1e-13
+    error('G_tx Gram matrix is numerically singular.');
 end
 
-fprintf('\nODSS ambiguity extraction completed.\n');
-fprintf('Extracted symbols: %d\n', symbolPointer-1);
+G_rx = G_tx / Gram;
 
-% Check linearity: A(r_s+w) = A(r_s) + A(w)
-ambiguityLinearityError = norm(Y_vector - Ys_vector - Wnoise_vector) / max(norm(Y_vector), eps);
+biorthError = norm( ...
+    Ts*(G_rx' * G_tx) - eye(M_tot), ...
+    'fro') / sqrt(M_tot);
 
-fprintf('Ambiguity linearity error: %.3e\n', ambiguityLinearityError);
-
-%% 2. Convert transmitted X[n,m] into vector form
-
-X_vector = complex(zeros(M_tot,1));
-
-symbolPointer = 1;
-
-for n = 0:Nscale-1
-
-    Mn = M_scale(n+1);
-
-    X_vector(symbolPointer:symbolPointer+Mn-1) = X_grid(n+1,1:Mn).';
-
-    symbolPointer = symbolPointer + Mn;
-end
+fprintf('Biorthogonality error = %.3e\n', ...
+    biorthError);
 
 
-%% 3. Compute H_{n,m}[n,m] using Eq. (65)
-%
-% For the discrete multipath channel:
-%
-% h(tau,alpha) =
-%     sum_p h_p delta(tau-tau_p) delta(alpha-alpha_p)
-%
-% Eq. (65):
-%
-% H_{n,m}[n,m]
-%   = sum_p h_p A_{g_rx,g_tx}(q^n * [m/(q^n W)*(alpha_p-1)- alpha_p*tau_p],
-%         1/alpha_p)
+%% Noiseless waveform closed-loop test
+Y0_vector = Ts * G_rx' * s_tx;
 
-Hdiag_grid = complex(zeros(Nscale, M_scale(end)));
-Hdiag_vector = complex(zeros(M_tot,1));
+Y0Error = norm(Y0_vector-X_vector) ...
+    / max(norm(X_vector),eps);
 
-% Samples of the basic transmit pulse g_tx(t)
-gTxBasic = odssTransmitPulse(t, q, W, T, pulseType);
+fprintf('Noiseless ||Y0-X||/||X|| = %.3e\n', ...
+    Y0Error);
 
-symbolPointer = 1;
+%% AWGN ODSS receiver
+Y_vector = Ts * G_rx' * r;
 
-for n = 0:Nscale-1
-
-    alphaGrid = q^n;
-    Mn = M_scale(n+1);
-
-    for m = 0:Mn-1
-
-        Hnm = 0;
-
-        for p = 1:Path_num
-
-            % First ambiguity argument in Eq. (65)
-            tauAmb = alphaGrid * ( m/(alphaGrid*W) * (alpha_p(p)-1) ...
-                - alpha_p(p)*tau_p(p));
-
-            % Second ambiguity argument in Eq. (65)
-            alphaAmb = 1 / alpha_p(p);
-
-            % A_{g_rx,g_tx}(tauAmb, alphaAmb)
-            ambiguityPath = odssAmbiguitySample(gTxBasic, t, tauAmb, alphaAmb, ...
-                q, W, T, pulseType);
-
-            Hnm = Hnm + h_p(p)*ambiguityPath;
-        end
-
-        Hdiag_grid(n+1,m+1) = Hnm;
-        Hdiag_vector(symbolPointer) = Hnm;
-
-        symbolPointer = symbolPointer + 1;
-    end
-end
-
-fprintf('Diagonal channel coefficients computed.\n');
-
-
-%% 4. Check the diagonal approximation in Eq. (51)
-%
-% Under robust bi-orthogonality:
-%
-% Ys[n,m] ~= H_{n,m}[n,m] X[n,m]
-
-Ys_diagonal_model = Hdiag_vector .* X_vector;
-
-diagonalModelError = norm(Ys_vector - Ys_diagonal_model) / max(norm(Ys_vector), eps);
-
-fprintf('Eq. (51) diagonal-model error: %.3e\n', diagonalModelError);
-
-% Interpretation:
-% small error  -> one-tap receiver assumption is reasonable
-% large error  -> substantial off-diagonal interference remains
-
-
-%% 5. Estimate delay-scale-domain noise variance
-%
-% Eq. (69) uses sigma_W^2.
-%
-% In this simulation, w is known, so Wnoise_vector can be used.
-% In a real receiver, sigma_W^2 must be estimated using pilots or
-% a noise-power estimator.
-
-sigmaW2 = mean(abs(Wnoise_vector).^2);
-
-fprintf('Delay-scale noise variance: %.6e\n', sigmaW2);
-
-
-%% 6. Delay-scale-domain one-tap MMSE equalization, Eq. (69)
-%
-% Matrix form:
-%
-% Z_hat = D^H (D D^H + sigmaW2 I)^(-1) Y_hat
-%
-% Since D is diagonal:
-%
-% Z_hat_i =
-%   conj(H_i) Y_i / (|H_i|^2 + sigmaW2)
-
-Zhat_vector = conj(Hdiag_vector) .* Y_vector ./ (abs(Hdiag_vector).^2 + sigmaW2 + eps);
-
-% Put Z_hat back into the scale-delay grid
-Zhat_grid = complex(zeros(Nscale, M_scale(end)));
-
-symbolPointer = 1;
-
-for n = 0:Nscale-1
-
-    Mn = M_scale(n+1);
-
-    Zhat_grid(n+1,1:Mn) = ...
-        Zhat_vector(symbolPointer:symbolPointer+Mn-1).';
-
-    symbolPointer = symbolPointer + Mn;
-end
-
-equalizedXError = norm(Zhat_vector-X_vector) / max(norm(X_vector),eps);
-
-fprintf('Equalized X-domain relative error: %.3e\n', equalizedXError);
-
-
-%% 7. Inverse discrete Mellin-Fourier transform
-%
-% Eq. (62), applied after equalization:
-%
-% x_hat[k,l]
-%   = sum_n sum_m q^(n/2) Z_hat[n,m]
-%       exp(j*2*pi*(n*k/N - m*l/M(n)))
-%
-% This implements Eq. (70) before constellation slicing.
-
-x_hat_grid = complex(zeros(Nscale, M_scale(end)));
-
-for k = 0:Nscale-1
-    Mk = M_scale(k+1);
-    for l = 0:Mk-1
-        temp = 0;
-        for n = 0:Nscale-1
-            Mn = M_scale(n+1);
-            mVector = 0:Mn-1;
-            phase = exp(1j*2*pi * (n*k/Nscale - mVector*l/Mn));
-            temp = temp + q^(n/2) * sum(Zhat_grid(n+1,1:Mn) .* phase);
-        end
-        x_hat_grid(k+1,l+1) = temp;
-    end
-end
-
-
-%% 8. Convert recovered x_hat[k,l] to vector form
-x_hat_vector = complex(zeros(M_tot,1));
-symbolPointer = 1;
-for k = 0:Nscale-1
-    Mk = M_scale(k+1);
-    x_hat_vector(symbolPointer:symbolPointer+Mk-1) = x_hat_grid(k+1,1:Mk).';
-    symbolPointer = symbolPointer + Mk;
-end
-
-dataSymbolError = norm(x_hat_vector-x_vector) / max(norm(x_vector),eps);
-
-fprintf('Recovered data-symbol relative error: %.3e\n', dataSymbolError);
+% Pure AWGN: equivalent channel is identity
+Zhat_vector = Y_vector;
 
 
 %% 9. QAM constellation slicing, Eq. (70)

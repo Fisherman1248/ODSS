@@ -1,0 +1,275 @@
+%% ODSS over a pure AWGN channel
+% Follows the slide/paper processing chain:
+%
+%   x[k,l] --T_iMF--> X[n,m] --ODSS modulator--> s(t)
+%          --AWGN--> r(t) --ODSS demodulator--> Yhat[n,m]
+%          --one-tap MMSE--> Zhat[n,m] --T_iMF^{-1}--> xhat[k,l]
+%
+% Pure AWGN channel:
+%   h(tau,alpha) = delta(tau) delta(alpha-1)
+%   D = I
+%   Yhat = X + W
+%
+% The sampled receiver below uses the canonical dual basis so that
+% Ts*G_rx'*G_tx = I numerically. This deliberately enforces the ideal
+% bi-orthogonality assumed by the slides and is useful as an AWGN
+% transmitter/receiver smoke test.
+%
+% MATLAB R2016b or newer is required for local functions in scripts.
+
+clear; clc; close all;
+rng(3);
+
+%% 1. Parameters
+q        = 2.0;
+Nscale   = 7;
+B        = 1280;                 % total baseband bandwidth, Hz
+W        = B*(q-1)/(q^Nscale-1); % Eq. (77), basic chirplet bandwidth
+T        = 1.9;                  % ODSS block duration, s
+Fs       = 10240;                % waveform sampling rate, Hz
+Ts       = 1/Fs;
+SNRdB    = 30;
+pulseType = 'phydyas';           % 'rect' or 'phydyas'
+
+n_set    = 0:Nscale-1;
+M_scale  = floor(q.^n_set);
+M_tot    = sum(M_scale);
+
+fprintf('================ ODSS pure-AWGN test ================\n');
+fprintf('q = %.3f, Nscale = %d, M_tot = %d\n', q, Nscale, M_tot);
+fprintf('B = %.3f Hz, W = %.6f Hz, T = %.6f s, Fs = %.1f Hz\n\n', ...
+    B, W, T, Fs);
+
+%% 2. Scale-major index map
+% Vector ordering:
+%   (0,0),
+%   (1,0),(1,1),
+%   (2,0),...,(2,M(2)-1), ...
+pair_n = zeros(M_tot,1);
+pair_m = zeros(M_tot,1);
+
+idx = 0;
+for n = 0:Nscale-1
+    for m = 0:M_scale(n+1)-1
+        idx = idx + 1;
+        pair_n(idx) = n;
+        pair_m(idx) = m;
+    end
+end
+
+%% 3. Discrete inverse Mellin-Fourier transform, Eq. (38)
+% X[n,m] = q^(-n/2)/N *
+%          sum_k { 1/M(k) * sum_l x[k,l]
+%          exp(j2pi(ml/M(k)-nk/N)) }
+
+T_iMF = complex(zeros(M_tot, M_tot));
+
+for outIdx = 1:M_tot
+    n = pair_n(outIdx);
+    m = pair_m(outIdx);
+
+    for inIdx = 1:M_tot
+        k = pair_n(inIdx);
+        l = pair_m(inIdx);
+        Mk = M_scale(k+1);
+
+        T_iMF(outIdx,inIdx) = ...
+            q^(-n/2) / (Nscale*Mk) * ...
+            exp(1j*2*pi*(m*l/Mk - n*k/Nscale));
+    end
+end
+
+fprintf('Transform diagnostics\n');
+fprintf('rank(T_iMF) = %d / %d\n', rank(T_iMF), M_tot);
+fprintf('cond(T_iMF) = %.3e\n', cond(T_iMF));
+fprintf('inverse check = %.3e\n\n', ...
+    norm((T_iMF\T_iMF)-eye(M_tot),'fro')/sqrt(M_tot));
+
+%% 4. Build sampled ODSS synthesis matrix, Eq. (40)/(73)
+Ns = round(T*Fs);
+t  = (0:Ns-1).' / Fs;
+
+G_tx = complex(zeros(Ns, M_tot));
+
+for col = 1:M_tot
+    n = pair_n(col);
+    m = pair_m(col);
+
+    % q^n * (t - m/(q^n W))
+    tLocal = q^n .* (t - m/(q^n*W));
+
+    G_tx(:,col) = q^(n/2) .* odssTransmitPulse(tLocal, q, W, T, pulseType);
+end
+
+% Continuous-time Gram matrix approximated by a Riemann sum.
+Gram_tx = Ts * (G_tx' * G_tx);
+
+% Canonical dual receive basis:
+% Ts*G_rx'*G_tx = I.
+G_rx = G_tx / Gram_tx;
+
+biorthErr = norm(Ts*(G_rx'*G_tx)-eye(M_tot),'fro')/sqrt(M_tot);
+
+fprintf('Waveform diagnostics\n');
+fprintf('samples = %d\n', Ns);
+fprintf('rank(G_tx) = %d / %d\n', rank(G_tx), M_tot);
+fprintf('cond(Ts*G_tx^H*G_tx) = %.3e\n', cond(Gram_tx));
+fprintf('biorthogonality error = %.3e\n\n', biorthErr);
+
+%% 5. Generate unit-power Gray QPSK symbols x[k,l]
+bits = randi([0 1], 2*M_tot, 1);
+
+x_vector = ((1 - 2*bits(1:2:end)) + ...
+         1j*(1 - 2*bits(2:2:end))) / sqrt(2);
+
+%% 6. ODSS transform and waveform modulation
+X_vector = T_iMF * x_vector;
+s_tx     = G_tx * X_vector;
+
+%% 7. Noiseless closed-loop check
+Y0_vector = Ts * (G_rx' * s_tx);
+x0_soft   = T_iMF \ Y0_vector;
+
+fprintf('Noiseless closed-loop\n');
+fprintf('||Y0-X||/||X|| = %.3e\n', ...
+    norm(Y0_vector-X_vector)/norm(X_vector));
+fprintf('||x0-x||/||x|| = %.3e\n\n', ...
+    norm(x0_soft-x_vector)/norm(x_vector));
+
+%% 8. Pure AWGN channel
+% There is no delay, no scale distortion, and no fading:
+% r(t) = s(t) + w(t).
+
+signalPower = mean(abs(s_tx).^2);
+noisePower  = signalPower / 10^(SNRdB/10);
+
+w_time = sqrt(noisePower/2) .* ...
+    (randn(Ns,1) + 1j*randn(Ns,1));
+
+r = s_tx + w_time;
+
+measuredSNRdB = 10*log10( ...
+    mean(abs(s_tx).^2) / mean(abs(w_time).^2));
+
+fprintf('Pure AWGN channel\n');
+fprintf('signal power = %.6e\n', signalPower);
+fprintf('noise power  = %.6e\n', noisePower);
+fprintf('target SNR   = %.2f dB\n', SNRdB);
+fprintf('measured SNR = %.2f dB\n\n', measuredSNRdB);
+
+%% 9. ODSS demodulator, Eq. (45)
+% Sampling the cross-ambiguity function is represented by the receive bank.
+Yhat_vector = Ts * (G_rx' * r);
+
+% This is available in simulation and is used only to verify/normalize
+% the delay-scale-domain noise variance.
+W_vector = Ts * (G_rx' * w_time);
+
+linearityErr = norm(Yhat_vector - (X_vector + W_vector)) / ...
+               max(norm(Yhat_vector), eps);
+
+fprintf('Delay-scale extraction\n');
+fprintf('||Yhat-(X+W)||/||Yhat|| = %.3e\n', linearityErr);
+
+%% 10. One-tap MMSE equalizer, Eqs. (68)-(69)
+% For a pure AWGN channel:
+%   H_nm[n,m] = 1
+%   D = I
+%
+% The slides write:
+%   Zhat = D^H (D D^H + sigma_W^2 I)^(-1) Yhat.
+%
+% Because the exact Eq. (38) matrix is not numerically unit-normalized
+% under ordinary vector stacking, use sigma_W^2 / E{|X|^2}; this is the
+% power-normalized form of the same one-tap MMSE expression.
+
+D = eye(M_tot);
+
+Es_delayScale      = mean(abs(X_vector).^2);
+sigmaW2_delayScale = mean(abs(W_vector).^2);
+mmseLoading        = sigmaW2_delayScale / Es_delayScale;
+
+Zhat_vector = D' * ((D*D' + mmseLoading*eye(M_tot)) \ Yhat_vector);
+
+fprintf('delay-scale signal power = %.6e\n', Es_delayScale);
+fprintf('delay-scale noise power  = %.6e\n', sigmaW2_delayScale);
+fprintf('MMSE loading             = %.6e\n\n', mmseLoading);
+
+%% 11. Inverse ODSS transform and QPSK slicing, Eq. (70)
+x_soft = T_iMF \ Zhat_vector;
+
+bits_hat = zeros(size(bits));
+bits_hat(1:2:end) = real(x_soft) < 0;
+bits_hat(2:2:end) = imag(x_soft) < 0;
+
+x_hat = ((1 - 2*bits_hat(1:2:end)) + ...
+      1j*(1 - 2*bits_hat(2:2:end))) / sqrt(2);
+
+numBitErrors = nnz(bits_hat ~= bits);
+BER          = numBitErrors / numel(bits);
+
+fprintf('Recovered symbols\n');
+fprintf('||Zhat-X||/||X|| = %.3e\n', ...
+    norm(Zhat_vector-X_vector)/norm(X_vector));
+fprintf('||xsoft-x||/||x|| = %.3e\n', ...
+    norm(x_soft-x_vector)/norm(x_vector));
+fprintf('bit errors = %d / %d\n', numBitErrors, numel(bits));
+fprintf('BER = %.6e\n', BER);
+
+%% 12. Constellation
+figure;
+plot(real(x_soft), imag(x_soft), 'o');
+hold on;
+plot(real(x_vector), imag(x_vector), 'kx', 'LineWidth', 1.5);
+grid on;
+axis equal;
+xlabel('In-phase');
+ylabel('Quadrature');
+title(sprintf('ODSS over pure AWGN, SNR = %.1f dB', SNRdB));
+legend('Before slicing', 'Transmitted QPSK', 'Location', 'best');
+
+
+%% Local function: basic chirplet and optional PHYDYAS window
+function g_tx = odssTransmitPulse(tLocal, q, W, T, pulseType)
+% Implements the basic chirplet in Eq. (71), with physical frequencies
+% chosen so that f2-f1 = W:
+%
+% normalized endpoints: 1/sqrt(q), sqrt(q)
+% physical scaling: W/(sqrt(q)-1/sqrt(q))
+
+    g_tx = complex(zeros(size(tLocal)));
+
+    valid = (tLocal >= 0) & (tLocal < T);
+    if ~any(valid)
+        return;
+    end
+
+    tv = tLocal(valid);
+
+    freqScale = W / (sqrt(q) - 1/sqrt(q));
+    f1 = freqScale / sqrt(q);
+    f2 = freqScale * sqrt(q);
+    kappa = (f2-f1)/T;
+
+    g0 = exp(1j*2*pi*(f1*tv + 0.5*kappa*tv.^2));
+
+    switch lower(pulseType)
+        case 'rect'
+            window = ones(size(tv));
+
+        case 'phydyas'
+            K = 3;
+            A = [0.91143783, 0.41143783];
+
+            window = ones(size(tv));
+            for kk = 1:K-1
+                window = window + ...
+                    2*(-1)^kk*A(kk).*cos(2*pi*kk*tv/(K*T));
+            end
+
+        otherwise
+            error('Unknown pulseType: %s', pulseType);
+    end
+
+    g_tx(valid) = window .* g0;
+end
