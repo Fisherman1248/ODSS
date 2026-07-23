@@ -27,7 +27,7 @@ W        = B*(q-1)/(q^Nscale-1); % Eq. (77), basic chirplet bandwidth
 T        = 1.9;                  % ODSS block duration, s
 Fs       = 10240;                % waveform sampling rate, Hz
 Ts       = 1/Fs;
-SNRdB    = 30;
+SNRdB    = 20;
 pulseType = 'phydyas';           % 'rect' or 'phydyas'
 
 n_set    = 0:Nscale-1;
@@ -187,6 +187,8 @@ fprintf('delay-scale signal power = %.6e\n', Es_delayScale);
 fprintf('delay-scale noise power  = %.6e\n', sigmaW2_delayScale);
 fprintf('MMSE loading             = %.6e\n\n', mmseLoading);
 
+
+
 %% 11. Inverse ODSS transform and QPSK slicing, Eq. (70)
 x_soft = T_iMF \ Zhat_vector;
 
@@ -207,6 +209,15 @@ fprintf('||xsoft-x||/||x|| = %.3e\n', ...
     norm(x_soft-x_vector)/norm(x_vector));
 fprintf('bit errors = %d / %d\n', numBitErrors, numel(bits));
 fprintf('BER = %.6e\n', BER);
+
+
+%% Theoretical BER of Gray-coded 4-QAM/QPSK over AWGN
+EbN0_linear = 10^(SNRdB/10);
+BER_theory  = qfunc(sqrt(2*EbN0_linear));
+
+fprintf('\nBER comparison\n');
+fprintf('simulated BER   = %.6e\n', BER);
+fprintf('theoretical BER = %.6e\n', BER_theory);
 
 %% 12. Constellation
 figure;
