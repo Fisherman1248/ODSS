@@ -103,8 +103,7 @@ for n = 0:Nscale-1
     for m = 0:Mn-1
         tLocal = q^n * (t - m/(q^n*W));
 
-        g_tx_nm = odssTransmitPulse( ...
-            tLocal, q, W, T, pulseType);
+        g_tx_nm = odssTransmitPulse(tLocal, q, W, T, pulseType);
 
         s_mn = q^(n/2) * g_tx_nm;
 
@@ -151,13 +150,11 @@ rs = s_tx;
 Ps = mean(abs(rs).^2);
 Pn = Ps * 10^(-SNRdB/10);
 
-w = sqrt(Pn/2) * ...
-    (randn(size(rs)) + 1j*randn(size(rs)));
+w = sqrt(Pn/2) * (randn(size(rs)) + 1j*randn(size(rs)));
 
 r = rs + w;
 
-measuredSNR = 10*log10( ...
-    mean(abs(rs).^2) / mean(abs(w).^2));
+measuredSNR = 10*log10( mean(abs(rs).^2) / mean(abs(w).^2));
 
 fprintf('\nPure AWGN channel:\n');
 fprintf('Signal power: %.6e\n', Ps);
