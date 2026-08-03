@@ -19,7 +19,7 @@ clear; clc; close all;
 
 %% 1. Parameters
 q = 2.0;
-Nscale = 7;
+Nscale = 6;
 B = 1280;
 W = B*(q-1)/(q^Nscale-1);
 T = 1.9;
@@ -430,16 +430,20 @@ fprintf('SER = %.6e\n', SER);
 fprintf('bit errors = %d / %d\n', numBitErrors, numel(tx_bits));
 fprintf('BER = %.6e\n', BER);
 
-%% 15. Theoretical BER of Gray-coded 4-QAM/QPSK over AWGN
-% This is only a rough reference because SNRdB here is waveform sample SNR,
-% not necessarily the exact recovered-symbol Eb/N0.
+%% 15. Theoretical BER of Gray-coded QPSK over AWGN
 
-EbN0_linear = 10^(SNRdB/10);
+bitsPerSymbol = log2(QAM_order);
+
+EbN0dB = SNRdB - 10*log10(bitsPerSymbol);
+EbN0_linear = 10^(EbN0dB/10);
+
 BER_theory = qfunc(sqrt(2*EbN0_linear));
 
 fprintf('\nBER comparison\n');
-fprintf('simulated BER   = %.6e\n', BER);
-fprintf('theoretical BER = %.6e\n', BER_theory);
+fprintf('SNR = Es/N0      = %.2f dB\n', SNRdB);
+fprintf('equivalent Eb/N0 = %.2f dB\n', EbN0dB);
+fprintf('simulated BER    = %.6e\n', BER);
+fprintf('QPSK theory BER  = %.6e\n', BER_theory);
 
 %% 16. Constellation
 figure;

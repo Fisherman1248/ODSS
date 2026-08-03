@@ -1,145 +1,237 @@
-%% ODSS transmitter
-% Generate an ODSS waveform and save everything needed by RX.m.
+function [folderName] = TX(q)
+% Generate transmitter data for the ODSS pure-AWGN simulation.
+%
+% Input:
+%   q          - ODSS scale factor
 %
 % Output:
-%   TX_data.mat (saved next to this script)
+%   folderName - folder containing AWGN_Data.mat
 %
-% MATLAB R2016b or newer is required for local functions in scripts.
+% Notes:
+%   1. No CP or zero padding is used.
+%   2. No multipath delay or Doppler is applied.
+%   3. No AWGN is added in this function.
+%      The receiver adds noise according to the required SNR.
+%   4. rec_data contains the noiseless baseband ODSS waveform.
 
-clear; clc; close all;
+    %% 1. ODSS parameters
+    Nscale = 6;
+    B = 1280;
+    T = 1.9;
+    Fs = 10240;
+    Ts = 1/Fs;
 
-%% 1. Transmitter parameters
-q = 1.5;
-Nscale = 6;
-B = 1280;
-W = B*(q-1)/(q^Nscale-1);
-T = 1.9;
-Fs = 10240;
-Ts = 1/Fs;
-pulseType = 'phydyas';
-QAM_order = 4;
-SNRdB_curve = 0:2:40;
+    pulseType = 'rect'; % 'phydyas';
+    QAM_order = 4;
 
-n_set = 0:Nscale-1;
-M_scale = floor(q.^n_set);
-M_tot = sum(M_scale);
-
-%% 2. Valid ODSS index mapping
-% pair_n(idx), pair_m(idx) give the mathematical index (n,m)
-% associated with the idx-th element of X_vector.
-pair_n = zeros(M_tot,1);
-pair_m = zeros(M_tot,1);
-
-indexPointer = 1;
-
-for n = 0:Nscale-1
-    Mn = M_scale(n+1);
-
-    for m = 0:Mn-1
-        pair_n(indexPointer) = n;
-        pair_m(indexPointer) = m;
-        indexPointer = indexPointer + 1;
+    if q <= 1
+        error('q must be greater than 1.');
     end
-end
 
-%% 3. Generate the source bits and QAM symbols
-bitsPerSymbol = log2(QAM_order);
-tx_bits = randi([0,1], M_tot*bitsPerSymbol, 1);
-x_vector = qammod(tx_bits, QAM_order, 'InputType', 'bit', 'UnitAveragePower', true);
+    W = B*(q-1)/(q^Nscale-1);
 
-%% 4. Map the serial QAM symbols to x[k,l]
-% x_grid(k+1,l+1) represents the mathematical symbol x[k,l].
-x_grid = complex(zeros(Nscale, M_scale(end)));
-symbolPointer = 1;
-for k = 0:Nscale-1
-    Mk = M_scale(k+1);
-    symbolIndices = symbolPointer:symbolPointer+Mk-1;
-    x_grid(k+1,1:Mk) = x_vector(symbolIndices).';
-    symbolPointer = symbolPointer + Mk;
-end
+    %% 2. Monte Carlo parameters
+    num_paths = 1;
+    num_run = 100;
+    num_blocks = 1;
 
-%% 5. Discrete inverse Mellin-Fourier transform, Eq. (38)
-X_grid = complex(zeros(Nscale, M_scale(end)));
-for n = 0:Nscale-1
-    Mn = M_scale(n+1);
-    for m = 0:Mn-1
-        temp = 0;
-        for k = 0:Nscale-1
-            Mk = M_scale(k+1);
-            for l = 0:Mk-1
-                temp = temp + x_grid(k+1,l+1)* exp(1j*2*pi*(m*l/Mk - n*k/Nscale))/Mk;
-            end
+    bitsPerSymbol = log2(QAM_order);
+
+    if mod(bitsPerSymbol,1) ~= 0
+        error('QAM_order must be a power of two.');
+    end
+
+    %% 3. Valid ODSS index mapping
+    % pair_n(idx) and pair_m(idx) contain the mathematical
+    % ODSS index (n,m) associated with vector index idx.
+    n_set = 0:Nscale-1;
+    M_scale = floor(q.^n_set);
+    M_tot = sum(M_scale);
+
+    pair_n = zeros(M_tot,1);
+    pair_m = zeros(M_tot,1);
+
+    indexPointer = 1;
+
+    for n = 0:Nscale-1
+        Mn = M_scale(n+1);
+
+        for m = 0:Mn-1
+            pair_n(indexPointer) = n;
+            pair_m(indexPointer) = m;
+            indexPointer = indexPointer + 1;
         end
-        X_grid(n+1,m+1) = q^(-n/2)*temp/Nscale;
     end
-end
 
-%% 6. Convert X_grid to X_vector
-X_vector = complex(zeros(M_tot,1));
-symbolPointer = 1;
-for n = 0:Nscale-1
-    Mn = M_scale(n+1);
-    symbolIndices = symbolPointer:symbolPointer+Mn-1;
-    X_vector(symbolIndices) = X_grid(n+1,1:Mn).';
-    symbolPointer = symbolPointer + Mn;
-end
+    %% 4. Construct the discrete inverse Mellin-Fourier matrix
+    % X_vector = T_iMF*x_vector
+    %
+    % This implements Eq. (38):
+    %
+    % X[n,m] = q^(-n/2)/Nscale *
+    %          sum_k sum_l x[k,l]/M(k) *
+    %          exp(j*2*pi*(m*l/M(k) - n*k/Nscale))
+    T_iMF = complex(zeros(M_tot,M_tot));
 
-%% 7. Construct T_iMF for receiver-side inverse transformation
-T_iMF = complex(zeros(M_tot,M_tot));
+    for outIdx = 1:M_tot
+        n = pair_n(outIdx);
+        m = pair_m(outIdx);
 
-for outIdx = 1:M_tot
-    n = pair_n(outIdx);
-    m = pair_m(outIdx);
+        for inIdx = 1:M_tot
+            k = pair_n(inIdx);
+            l = pair_m(inIdx);
 
-    for inIdx = 1:M_tot
-        k = pair_n(inIdx);
-        l = pair_m(inIdx);
-        Mk = M_scale(k+1);
+            Mk = M_scale(k+1);
 
-        T_iMF(outIdx,inIdx) = q^(-n/2)/(Nscale*Mk)*exp(1j*2*pi*(m*l/Mk - n*k/Nscale));
+            T_iMF(outIdx,inIdx) = q^(-n/2)/(Nscale*Mk) * exp(1j*2*pi*(m*l/Mk - n*k/Nscale));
+        end
     end
+
+    transformRank = rank(T_iMF);
+    transformCondition = cond(T_iMF);
+
+    %% 5. Construct the sampled ODSS transmit basis
+    Ns = round(T*Fs);
+
+    % Useful waveform interval: [0,T)
+    t = (0:Ns-1).'/Fs;
+
+    G_tx = complex(zeros(Ns,M_tot));
+
+    for col = 1:M_tot
+        n = pair_n(col);
+        m = pair_m(col);
+
+        % Argument of the prototype pulse:
+        % q^n(t - m/(q^n W))
+        tLocal = q^n*(t - m/(q^n*W));
+
+        G_tx(:,col) = q^(n/2) * odssTransmitPulse(tLocal,q,W,T,pulseType);
+    end
+    
+
+    %% 6. Construct the canonical dual receive basis
+    Gram_tx = Ts*(G_tx'*G_tx);
+
+    if rcond(Gram_tx) < 1e-12
+        warning(['The transmit Gram matrix is poorly conditioned. ', ...
+            'rcond(Gram_tx) = %.3e'],rcond(Gram_tx));
+    end
+
+    G_rx = G_tx/Gram_tx;
+
+    biorthErr = norm(Ts*(G_rx'*G_tx)-eye(M_tot),'fro')/sqrt(M_tot); % Ts * G_rx^H * G_tx = I
+
+    %% 7. Preallocate Monte Carlo data
+    % rec_data(:,ii,zz):
+    %   received noiseless waveform for block ii and run zz
+    %
+    % my_symbols(:,ii,zz):
+    %   integer QAM symbol labels
+    %
+    % tx_bits(:,ii,zz):
+    %   source bits
+    %
+    % x_data(:,ii,zz):
+    %   source-domain QAM vector x[k,l]
+    %
+    % X_data(:,ii,zz):
+    %   inverse Mellin-Fourier output X[n,m]
+
+    rec_data = complex(zeros(Ns,num_blocks,num_run));
+
+    my_symbols = zeros(M_tot,num_blocks,num_run,'uint16');
+
+    tx_bits = zeros(M_tot*bitsPerSymbol,num_blocks,num_run,'uint8');
+
+    x_data = complex(zeros(M_tot,num_blocks,num_run));
+
+    X_data = complex(zeros(M_tot,num_blocks,num_run));
+
+    signal_power = zeros(num_blocks,num_run);
+
+    %% 8. Pure-AWGN channel parameters
+    % These variables are retained to keep the saved-data structure
+    % consistent with the previous OHFM implementation.
+    %
+    % Pure AWGN identity channel:
+    %   delay             = 0
+    %   channel gain      = 1
+    %   Doppler parameter = 0
+    chan_tau = zeros(num_paths,num_run);
+    chan_A = ones(num_paths,num_run);
+    chan_a = zeros(num_paths,num_run);
+
+    %% 9. Transmitter Monte Carlo loop
+    for zz = 1:num_run
+
+        for ii = 1:num_blocks
+            bits = randi([0 1], M_tot*bitsPerSymbol, 1); % Generate source bits
+
+            % Convert bits to integer QAM symbols
+            symbols = bi2de(reshape(bits,bitsPerSymbol,[]).', 'left-msb');
+
+            x_vector = qammod( symbols, QAM_order, 'gray', 'UnitAveragePower',true); % QAM modulation
+            X_vector = T_iMF*x_vector; % Discrete inverse Mellin-Fourier transform
+
+            s_tx = G_tx*X_vector; % ODSS waveform modulation
+
+            % Pure AWGN identity channel
+            % Noise is not added here.
+            y = s_tx;
+
+            % Store generated data
+            tx_bits(:,ii,zz) = uint8(bits);
+            my_symbols(:,ii,zz) = uint16(symbols);
+
+            x_data(:,ii,zz) = x_vector;
+            X_data(:,ii,zz) = X_vector;
+
+            rec_data(:,ii,zz) = y;
+
+            signal_power(ii,zz) = mean(abs(s_tx).^2);
+        end
+
+        if mod(zz,10) == 0 || zz == 1 || zz == num_run
+            fprintf('Generated run %d/%d\n',zz,num_run);
+        end
+    end
+
+    %% 10. Generate output folder
+    folderName = sprintf('ODSS_AWGN_q%g_Nscale%d', q,Nscale);
+
+    if ~exist(folderName,'dir')
+        mkdir(folderName);
+    end
+
+    %% 11. Save transmitter data
+    txFormatVersion = 3;
+
+    dataFile = fullfile(folderName,'TX_Data.mat');
+
+    save(dataFile, ...
+        'txFormatVersion', 'rec_data', 'my_symbols', ...
+        'tx_bits', 'x_data', 'X_data', 'signal_power', ...
+        'num_paths', 'num_run', 'num_blocks', 'QAM_order', 'bitsPerSymbol', ...
+        'q', 'Nscale', 'B', 'W', 'T', 'Fs', 'Ts', 'pulseType', ...
+        'n_set', 'M_scale', 'M_tot', 'pair_n', 'pair_m', ...
+        'T_iMF', 'transformRank', 'transformCondition', 'Ns', 't', ...
+        'G_tx', 'G_rx', 'Gram_tx', 'biorthErr', ...
+        'chan_tau', 'chan_A', 'chan_a', '-v7.3');
+
+    %% 12. Display transmitter diagnostics
+    fprintf('\n');
+    fprintf('ODSS transmitter data saved successfully.\n');
+    fprintf('File: %s\n',dataFile);
+    fprintf('q = %.4f\n',q);
+    fprintf('Nscale = %d\n',Nscale);
+    fprintf('M_tot = %d\n',M_tot);
+    fprintf('Waveform samples per block = %d\n',Ns);
+    fprintf('Number of runs = %d\n',num_run);
+    fprintf('Number of blocks per run = %d\n',num_blocks);
+    fprintf('rank(T_iMF) = %d/%d\n',transformRank,M_tot);
+    fprintf('cond(T_iMF) = %.3e\n',transformCondition);
+    fprintf('Biorthogonality error = %.3e\n',biorthErr);
+    fprintf('Average waveform power = %.6e\n', mean(signal_power(:)));
+
 end
-
-X_vector_matrix = T_iMF*x_vector;
-loopMatrixError = norm(X_vector-X_vector_matrix)/max(norm(X_vector_matrix),eps);
-
-%% 8. Build the sampled ODSS synthesis matrix
-Ns = round(T*Fs);
-t = (0:Ns-1).'/Fs;
-
-G_tx = complex(zeros(Ns,M_tot));
-for col = 1:M_tot
-    n = pair_n(col);
-    m = pair_m(col);
-
-    tLocal = q^n*(t - m/(q^n*W));
-
-    G_tx(:,col) = q^(n/2)*odssTransmitPulse(tLocal, q, W, T, pulseType);
-end
-
-Gram_tx = Ts*(G_tx'*G_tx);
-G_rx = G_tx/Gram_tx;
-biorthErr = norm(Ts*(G_rx'*G_tx)-eye(M_tot),'fro')/sqrt(M_tot);
-
-%% 9. ODSS waveform modulation
-s_tx = G_tx*X_vector;
-
-%% 10. Save transmitter output and receiver metadata
-% G_tx is intentionally not stored because RX.m reconstructs its own
-% receive basis from the saved waveform parameters.
-txFormatVersion = 1;
-txDataFile = fullfile(fileparts(mfilename('fullpath')), 'TX_data.mat');
-
-save(txDataFile, ...
-    'txFormatVersion', ...
-    'q', 'Nscale', 'B', 'W', 'T', 'Fs', 'Ts', 'SNRdB_curve', ...
-    'pulseType', 'QAM_order', 'bitsPerSymbol', ...
-    'n_set', 'M_scale', 'M_tot', 'Ns', 't', ...
-    'pair_n', 'pair_m', 'T_iMF', ...
-    'tx_bits', 'x_vector', 'x_grid', ...
-    'X_vector', 'X_grid', 's_tx', 'G_tx', 'G_rx', ...
-    'loopMatrixError');
-
-fprintf('Transmitter data saved successfully:\n%s\n', txDataFile);
-fprintf('Saved waveform samples: %d\n', numel(s_tx));
-fprintf('Saved source bits: %d\n', numel(tx_bits));

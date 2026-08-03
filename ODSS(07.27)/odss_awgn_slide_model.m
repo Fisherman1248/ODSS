@@ -25,7 +25,7 @@ W = B*(q-1)/(q^Nscale-1);
 T = 1.9;
 Fs = 10240;
 Ts = 1/Fs;
-SNRdB = 1;
+SNRdB = 40;
 pulseType = 'phydyas';
 QAM_order = 4;
 
@@ -540,8 +540,7 @@ function A = matchedFilterSample(r, t, template)
 end
 
 
-function A = delay_scale_ambiguity( ...
-    r, t, g_rx_fun, tau, alpha)
+function A = delay_scale_ambiguity(r, t, g_rx_fun, tau, alpha)
 %DELAY_SCALE_AMBIGUITY
 %
 % Computes:
@@ -570,8 +569,7 @@ function A = delay_scale_ambiguity( ...
     % Construct the delay-scale receive template directly.
     % No interp1 is required because g_rx_fun can be evaluated
     % directly at arbitrary time arguments.
-    template = sqrt(alpha) .* ...
-        g_rx_fun(alpha .* (t - tau));
+    template = sqrt(alpha) .* g_rx_fun(alpha .* (t - tau));
 
     template = template(:);
 

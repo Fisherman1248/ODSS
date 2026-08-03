@@ -11,7 +11,7 @@ end
 
 tv = tLocal(valid);
 
-freqScale = W/(sqrt(q)-1/sqrt(q));
+freqScale = 1;% W/(sqrt(q)-1/sqrt(q));
 f1 = freqScale/sqrt(q);
 f2 = freqScale*sqrt(q);
 kappa = (f2-f1)/T;
